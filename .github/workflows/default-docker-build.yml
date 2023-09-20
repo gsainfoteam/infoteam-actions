@@ -1,0 +1,94 @@
+name: Build docker image
+
+on:
+  workflow_call:
+    inputs:
+      repo_name:
+        required: true
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      SLACK_WEBHOOK_URL:
+        required: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-northeast-2
+        mask-aws-account-id: no
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ inputs.repo_name }}
+      run: |
+        IMAGE_TAG="${GITHUB_REF_NAME}_${GITHUB_SHA}"
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Report to Slack
+      id: report-slack-build
+      uses: 8398a7/action-slack@v3
+      with:
+        status : custom
+        author_name: Build in ${{github.ref_name}} ${{github.ref_type}}
+        fields: repo,commit,message
+        mention: channel
+        if_mention: failure,cancelled
+        custom_payload: |
+            {
+                text: '${{ job.status }}' === 'success' ? `:white_check_mark: Build in ${process.env.AS_REPO} Succeeded` : `:x: Build in ${process.env.AS_REPO}  Failed`,
+                attachments: [
+                  {
+                    color: '${{ job.status }}' === 'success' ? "#36a64f" : "#ff0000",
+                    title: "Details",
+                    fields: [
+                     {
+                        title: "Triggered by",
+                        value: "${{github.ref_name}} ${{github.ref_type}}",
+                        short: true
+                      },
+                      {
+                        title: "Message",
+                        value: `${process.env.AS_MESSAGE}`,
+                        short: true
+                      },
+                      {
+                        title: "Commit",
+                        value: `${process.env.AS_COMMIT}`,
+                        short: true
+                      },
+                      {
+                        title: "Image",
+                        value: '${{ job.status }}' === 'success' ? "${{ steps.build-image.outputs.image }}" : "Not Available",
+                      }
+                    ]
+                  }
+                ]
+            }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      if: always()
